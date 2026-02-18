@@ -28,12 +28,12 @@ func CaptureAudio(ctx context.Context, streamURL string, cfg *CaptureConfig) (io
 		"-headers", "Referer: " + referer + "\r\n",
 		"-i", streamURL,
 		// Output: raw PCM audio to stdout.
-		"-vn",                                   // no video
-		"-acodec", fmt.Sprintf("pcm_%s", cfg.Format), // e.g. pcm_s16le
+		"-vn",
+		"-acodec", fmt.Sprintf("pcm_%s", cfg.Format),
 		"-ar", strconv.Itoa(cfg.SampleRate),
 		"-ac", strconv.Itoa(cfg.Channels),
 		"-f", cfg.Format,
-		"pipe:1", // output to stdout
+		"pipe:1",
 	}
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
@@ -44,15 +44,16 @@ func CaptureAudio(ctx context.Context, streamURL string, cfg *CaptureConfig) (io
 	}
 
 	if err := cmd.Start(); err != nil {
+		stdout.Close()
 		return nil, fmt.Errorf("ffmpeg start: %w", err)
 	}
 
 	slog.Info("capture: ffmpeg started", "stream_url_prefix", truncateURL(streamURL))
 
-	// Wrap in a ReadCloser that also waits for the process to exit.
 	return &ffmpegReader{
 		ReadCloser: stdout,
 		cmd:        cmd,
+		ctx:        ctx,
 	}, nil
 }
 
@@ -61,6 +62,7 @@ func CaptureAudio(ctx context.Context, streamURL string, cfg *CaptureConfig) (io
 type ffmpegReader struct {
 	io.ReadCloser
 	cmd *exec.Cmd
+	ctx context.Context
 }
 
 func (f *ffmpegReader) Close() error {
@@ -70,13 +72,12 @@ func (f *ffmpegReader) Close() error {
 	// Wait for the process to exit (may already be dead from context cancel).
 	waitErr := f.cmd.Wait()
 
-	// Prefer the pipe error if both fail.
 	if pipeErr != nil {
 		return pipeErr
 	}
 	// Ignore exit errors caused by context cancellation (signal: killed).
-	if waitErr != nil && f.cmd.ProcessState != nil && !f.cmd.ProcessState.Exited() {
-		return nil // killed by context cancel
+	if waitErr != nil && f.ctx.Err() != nil {
+		return nil
 	}
 	return waitErr
 }
