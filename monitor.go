@@ -17,15 +17,15 @@ const (
 type Monitor struct {
 	cfg monitorConfig
 
-	mu     sync.Mutex
-	rooms  map[int64]context.CancelFunc // roomID -> cancel
-	status map[int64]bool               // roomID -> last known live status
-
-	subs   []chan RoomEvent
-	subsMu sync.RWMutex
-
+	mu        sync.Mutex
+	rooms     map[int64]context.CancelFunc // roomID -> cancel
+	status    map[int64]bool               // roomID -> last known live status
 	parentCtx context.Context
 	started   bool
+
+	subsMu sync.RWMutex
+	subs   []chan RoomEvent
+	closed bool // true after subscriber channels have been closed
 }
 
 // NewMonitor creates a Monitor with the given options.
@@ -53,8 +53,10 @@ func (m *Monitor) Watch(ctx context.Context, roomIDs []int64) (<-chan RoomEvent,
 	m.subs = append(m.subs, ch)
 	m.subsMu.Unlock()
 
+	m.mu.Lock()
 	m.parentCtx = ctx
 	m.started = true
+	m.mu.Unlock()
 
 	for _, id := range roomIDs {
 		m.startRoom(ctx, id)
@@ -63,9 +65,8 @@ func (m *Monitor) Watch(ctx context.Context, roomIDs []int64) (<-chan RoomEvent,
 	// Close subscriber channels when context is done.
 	go func() {
 		<-ctx.Done()
-		// Wait a moment for final events to flush.
-		time.Sleep(100 * time.Millisecond)
 		m.subsMu.Lock()
+		m.closed = true
 		for _, sub := range m.subs {
 			close(sub)
 		}
@@ -83,10 +84,12 @@ func (m *Monitor) AddRoom(roomID int64) {
 		m.mu.Unlock()
 		return
 	}
+	started := m.started
+	ctx := m.parentCtx
 	m.mu.Unlock()
 
-	if m.started && m.parentCtx != nil {
-		m.startRoom(m.parentCtx, roomID)
+	if started && ctx != nil {
+		m.startRoom(ctx, roomID)
 	}
 }
 
@@ -138,7 +141,7 @@ func (m *Monitor) checkRoom(ctx context.Context, roomID int64) {
 	info, err := GetRoomInfo(ctx, roomID)
 	if err != nil {
 		if ctx.Err() != nil {
-			return // context cancelled, not a real error
+			return
 		}
 		slog.Warn("monitor: failed to get room info", "room_id", roomID, "error", err)
 		return
@@ -181,6 +184,9 @@ func (m *Monitor) checkRoom(ctx context.Context, roomID int64) {
 func (m *Monitor) publishEvent(ev RoomEvent) {
 	m.subsMu.RLock()
 	defer m.subsMu.RUnlock()
+	if m.closed {
+		return
+	}
 	for _, ch := range m.subs {
 		select {
 		case ch <- ev:

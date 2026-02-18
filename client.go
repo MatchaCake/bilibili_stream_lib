@@ -25,12 +25,13 @@ type StreamClient struct {
 	cfg     clientConfig
 	monitor *Monitor
 
-	subs   []chan StreamEvent
 	subsMu sync.RWMutex
+	subs   []chan StreamEvent
+	closed bool // true after subscriber channels have been closed
 
 	// Track active captures so we can cancel them on room offline.
-	captures   map[int64]context.CancelFunc
 	capturesMu sync.Mutex
+	captures   map[int64]context.CancelFunc
 }
 
 // NewStreamClient creates a StreamClient with the given options.
@@ -87,8 +88,8 @@ func (c *StreamClient) Subscribe(ctx context.Context, roomIDs []int64) (<-chan S
 		}
 		c.capturesMu.Unlock()
 
-		time.Sleep(100 * time.Millisecond)
 		c.subsMu.Lock()
+		c.closed = true
 		for _, sub := range c.subs {
 			close(sub)
 		}
@@ -166,7 +167,6 @@ func (c *StreamClient) startCapture(ctx context.Context, roomID int64, title str
 	captureCtx, cancel := context.WithCancel(ctx)
 
 	c.capturesMu.Lock()
-	// Cancel previous capture if any.
 	if prevCancel, ok := c.captures[roomID]; ok {
 		prevCancel()
 	}
@@ -247,6 +247,9 @@ func (c *StreamClient) retryWait(ctx context.Context, attempt int) bool {
 func (c *StreamClient) publishStreamEvent(ev StreamEvent) {
 	c.subsMu.RLock()
 	defer c.subsMu.RUnlock()
+	if c.closed {
+		return
+	}
 	for _, ch := range c.subs {
 		select {
 		case ch <- ev:
