@@ -23,6 +23,11 @@ func CaptureAudio(ctx context.Context, streamURL string, cfg *CaptureConfig) (io
 	args := []string{
 		"-hide_banner",
 		"-loglevel", "error",
+		// Low-latency input: minimize buffering for live streams.
+		"-fflags", "nobuffer",
+		"-flags", "low_delay",
+		"-analyzeduration", "500000", // 0.5s (default 5s)
+		"-probesize", "500000",       // 500KB (default 5MB)
 		// Input: HTTP stream with required headers.
 		"-user_agent", userAgent,
 		"-headers", "Referer: " + referer + "\r\n",
