@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -43,6 +44,9 @@ func CaptureAudio(ctx context.Context, streamURL string, cfg *CaptureConfig) (io
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("ffmpeg stdout pipe: %w", err)
@@ -59,6 +63,7 @@ func CaptureAudio(ctx context.Context, streamURL string, cfg *CaptureConfig) (io
 		ReadCloser: stdout,
 		cmd:        cmd,
 		ctx:        ctx,
+		stderr:     &stderrBuf,
 	}, nil
 }
 
@@ -66,8 +71,9 @@ func CaptureAudio(ctx context.Context, streamURL string, cfg *CaptureConfig) (io
 // cleaned up when Close is called.
 type ffmpegReader struct {
 	io.ReadCloser
-	cmd *exec.Cmd
-	ctx context.Context
+	cmd    *exec.Cmd
+	ctx    context.Context
+	stderr *bytes.Buffer
 }
 
 func (f *ffmpegReader) Close() error {
@@ -77,10 +83,14 @@ func (f *ffmpegReader) Close() error {
 	// Wait for the process to exit (may already be dead from context cancel).
 	waitErr := f.cmd.Wait()
 
+	// Log stderr if ffmpeg exited with error (not from context cancel).
+	if waitErr != nil && f.ctx.Err() == nil && f.stderr.Len() > 0 {
+		slog.Error("capture: ffmpeg exited with error", "stderr", f.stderr.String())
+	}
+
 	if pipeErr != nil {
 		return pipeErr
 	}
-	// Ignore exit errors caused by context cancellation (signal: killed).
 	if waitErr != nil && f.ctx.Err() != nil {
 		return nil
 	}
