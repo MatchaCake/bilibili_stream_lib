@@ -74,37 +74,32 @@ func ResolveRoomID(ctx context.Context, shortID int64) (int64, error) {
 
 // GetRoomInfo fetches metadata for a live room.
 func GetRoomInfo(ctx context.Context, roomID int64) (*RoomInfo, error) {
-	apiResp, err := doGet(ctx, fmt.Sprintf(roomInfoURL, roomID), "")
+	return getRoomInfo(ctx, roomID, "")
+}
+
+// getRoomInfo is the internal version that accepts a cookie for authenticated requests.
+func getRoomInfo(ctx context.Context, roomID int64, cookie string) (*RoomInfo, error) {
+	apiResp, err := doGet(ctx, fmt.Sprintf(roomInfoURL, roomID), cookie)
 	if err != nil {
 		return nil, fmt.Errorf("get room info: %w", err)
 	}
 
-	var data struct {
-		RoomID     int64  `json:"room_id"`
-		ShortID    int64  `json:"short_id"`
-		UID        int64  `json:"uid"`
-		LiveStatus int    `json:"live_status"`
-		Title      string `json:"title"`
-		LiveTime   string `json:"live_time"`
-	}
-	if err := json.Unmarshal(apiResp.Data, &data); err != nil {
+	var info RoomInfo
+	if err := json.Unmarshal(apiResp.Data, &info); err != nil {
 		return nil, fmt.Errorf("parse room info: %w", err)
 	}
-
-	return &RoomInfo{
-		RoomID:     data.RoomID,
-		ShortID:    data.ShortID,
-		UID:        data.UID,
-		LiveStatus: data.LiveStatus,
-		Title:      data.Title,
-		LiveTime:   data.LiveTime,
-	}, nil
+	return &info, nil
 }
 
 // GetStreamURL fetches the FLV stream URL for a live room.
 // Returns an error if the room is not currently live.
 func GetStreamURL(ctx context.Context, roomID int64) (string, error) {
-	apiResp, err := doGet(ctx, fmt.Sprintf(playURL, roomID), "")
+	return getStreamURL(ctx, roomID, "")
+}
+
+// getStreamURL is the internal version that accepts a cookie for authenticated requests.
+func getStreamURL(ctx context.Context, roomID int64, cookie string) (string, error) {
+	apiResp, err := doGet(ctx, fmt.Sprintf(playURL, roomID), cookie)
 	if err != nil {
 		return "", fmt.Errorf("get stream url: %w", err)
 	}

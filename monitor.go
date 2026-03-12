@@ -138,7 +138,7 @@ func (m *Monitor) pollRoom(ctx context.Context, roomID int64) {
 
 // checkRoom queries room info and emits an event if the live status changed.
 func (m *Monitor) checkRoom(ctx context.Context, roomID int64) {
-	info, err := GetRoomInfo(ctx, roomID)
+	info, err := getRoomInfo(ctx, roomID, m.cfg.cookie)
 	if err != nil {
 		if ctx.Err() != nil {
 			return

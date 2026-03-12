@@ -3,7 +3,6 @@ package stream
 import (
 	"context"
 	"log/slog"
-	"math"
 	"sync"
 	"time"
 )
@@ -178,7 +177,7 @@ func (c *StreamClient) startCapture(ctx context.Context, roomID int64, title str
 			return
 		}
 
-		streamURL, err := GetStreamURL(captureCtx, roomID)
+		streamURL, err := getStreamURL(captureCtx, roomID, c.cfg.cookie)
 		if err != nil {
 			slog.Warn("client: failed to get stream URL",
 				"room_id", roomID, "attempt", attempt+1, "error", err)
@@ -188,7 +187,7 @@ func (c *StreamClient) startCapture(ctx context.Context, roomID int64, title str
 				Error:  err,
 				Title:  title,
 			})
-			if !c.retryWait(captureCtx, attempt) {
+			if !retryWait(captureCtx, attempt) {
 				return
 			}
 			continue
@@ -204,7 +203,7 @@ func (c *StreamClient) startCapture(ctx context.Context, roomID int64, title str
 				Error:  err,
 				Title:  title,
 			})
-			if !c.retryWait(captureCtx, attempt) {
+			if !retryWait(captureCtx, attempt) {
 				return
 			}
 			continue
@@ -229,8 +228,8 @@ func (c *StreamClient) startCapture(ctx context.Context, roomID int64, title str
 
 // retryWait waits with exponential backoff. Returns false if the context
 // was cancelled during the wait.
-func (c *StreamClient) retryWait(ctx context.Context, attempt int) bool {
-	delay := time.Duration(float64(baseRetryDelay) * math.Pow(2, float64(attempt)))
+func retryWait(ctx context.Context, attempt int) bool {
+	delay := baseRetryDelay << attempt
 	if delay > maxRetryDelay {
 		delay = maxRetryDelay
 	}

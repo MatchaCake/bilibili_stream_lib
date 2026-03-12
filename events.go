@@ -14,12 +14,12 @@ type RoomEvent struct {
 
 // RoomInfo holds metadata about a Bilibili live room.
 type RoomInfo struct {
-	RoomID     int64
-	ShortID    int64
-	UID        int64
-	LiveStatus int // 0=offline, 1=live, 2=rotation
-	Title      string
-	LiveTime   string
+	RoomID     int64  `json:"room_id"`
+	ShortID    int64  `json:"short_id"`
+	UID        int64  `json:"uid"`
+	LiveStatus int    `json:"live_status"` // 0=offline, 1=live, 2=rotation
+	Title      string `json:"title"`
+	LiveTime   string `json:"live_time"`
 }
 
 // CaptureConfig controls ffmpeg audio capture parameters.
