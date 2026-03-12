@@ -224,6 +224,11 @@ func (c *StreamClient) startCapture(ctx context.Context, roomID int64, title str
 	}
 
 	slog.Error("client: exhausted capture retries", "room_id", roomID)
+
+	c.capturesMu.Lock()
+	delete(c.captures, roomID)
+	c.capturesMu.Unlock()
+	cancel()
 }
 
 // retryWait waits with exponential backoff. Returns false if the context
@@ -234,10 +239,13 @@ func retryWait(ctx context.Context, attempt int) bool {
 		delay = maxRetryDelay
 	}
 
+	t := time.NewTimer(delay)
+	defer t.Stop()
+
 	select {
 	case <-ctx.Done():
 		return false
-	case <-time.After(delay):
+	case <-t.C:
 		return true
 	}
 }
