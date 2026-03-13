@@ -42,18 +42,21 @@ func CaptureAudio(ctx context.Context, streamURL string, cfg *CaptureConfig) (io
 		"pipe:1",
 	}
 
-	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	captureCtx, captureCancel := context.WithCancel(ctx)
+	cmd := exec.CommandContext(captureCtx, "ffmpeg", args...)
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		captureCancel()
 		return nil, fmt.Errorf("ffmpeg stdout pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
 		stdout.Close()
+		captureCancel()
 		return nil, fmt.Errorf("ffmpeg start: %w", err)
 	}
 
@@ -62,6 +65,7 @@ func CaptureAudio(ctx context.Context, streamURL string, cfg *CaptureConfig) (io
 	return &ffmpegReader{
 		ReadCloser: stdout,
 		cmd:        cmd,
+		cancel:     captureCancel,
 		ctx:        ctx,
 		stderr:     &stderrBuf,
 	}, nil
@@ -72,6 +76,7 @@ func CaptureAudio(ctx context.Context, streamURL string, cfg *CaptureConfig) (io
 type ffmpegReader struct {
 	io.ReadCloser
 	cmd    *exec.Cmd
+	cancel context.CancelFunc
 	ctx    context.Context
 	stderr *bytes.Buffer
 }
@@ -80,10 +85,15 @@ func (f *ffmpegReader) Close() error {
 	// Close the stdout pipe first.
 	pipeErr := f.ReadCloser.Close()
 
-	// Wait for the process to exit (may already be dead from context cancel).
+	// Cancel the derived context to ensure ffmpeg is terminated,
+	// preventing Wait from blocking if ffmpeg is still reading input.
+	f.cancel()
+
+	// Wait for the process to exit.
 	waitErr := f.cmd.Wait()
 
-	// Log stderr if ffmpeg exited with error (not from context cancel).
+	// Log stderr if ffmpeg exited with an unexpected error
+	// (not from the caller's context being cancelled).
 	if waitErr != nil && f.ctx.Err() == nil && f.stderr.Len() > 0 {
 		slog.Error("capture: ffmpeg exited with error", "stderr", f.stderr.String())
 	}
@@ -91,10 +101,7 @@ func (f *ffmpegReader) Close() error {
 	if pipeErr != nil {
 		return pipeErr
 	}
-	if waitErr != nil && f.ctx.Err() != nil {
-		return nil
-	}
-	return waitErr
+	return nil
 }
 
 // truncateURL returns the first 80 characters of a URL for logging.

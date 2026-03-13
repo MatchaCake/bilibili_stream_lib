@@ -14,6 +14,12 @@ const (
 	maxCaptureRetries  = 5
 )
 
+// captureHandle identifies a single capture attempt for pointer comparison,
+// so concurrent startCapture goroutines don't remove each other's map entry.
+type captureHandle struct {
+	cancel context.CancelFunc
+}
+
 // StreamClient is a high-level client that combines Monitor, stream URL
 // fetching, and ffmpeg audio capture into a single pub/sub interface.
 //
@@ -30,7 +36,7 @@ type StreamClient struct {
 
 	// Track active captures so we can cancel them on room offline.
 	capturesMu sync.Mutex
-	captures   map[int64]context.CancelFunc
+	captures   map[int64]*captureHandle
 }
 
 // NewStreamClient creates a StreamClient with the given options.
@@ -54,7 +60,7 @@ func NewStreamClient(opts ...ClientOption) *StreamClient {
 	return &StreamClient{
 		cfg:      cfg,
 		monitor:  NewMonitor(monitorOpts...),
-		captures: make(map[int64]context.CancelFunc),
+		captures: make(map[int64]*captureHandle),
 	}
 }
 
@@ -81,8 +87,8 @@ func (c *StreamClient) Subscribe(ctx context.Context, roomIDs []int64) (<-chan S
 		<-ctx.Done()
 		// Cancel all active captures.
 		c.capturesMu.Lock()
-		for roomID, cancel := range c.captures {
-			cancel()
+		for roomID, h := range c.captures {
+			h.cancel()
 			delete(c.captures, roomID)
 		}
 		c.capturesMu.Unlock()
@@ -109,8 +115,8 @@ func (c *StreamClient) RemoveRoom(roomID int64) {
 	c.monitor.RemoveRoom(roomID)
 
 	c.capturesMu.Lock()
-	if cancel, ok := c.captures[roomID]; ok {
-		cancel()
+	if h, ok := c.captures[roomID]; ok {
+		h.cancel()
 		delete(c.captures, roomID)
 	}
 	c.capturesMu.Unlock()
@@ -146,8 +152,8 @@ func (c *StreamClient) handleRoomEvent(ctx context.Context, ev RoomEvent) {
 	} else {
 		// Cancel any active capture for this room.
 		c.capturesMu.Lock()
-		if cancel, ok := c.captures[ev.RoomID]; ok {
-			cancel()
+		if h, ok := c.captures[ev.RoomID]; ok {
+			h.cancel()
 			delete(c.captures, ev.RoomID)
 		}
 		c.capturesMu.Unlock()
@@ -165,12 +171,27 @@ func (c *StreamClient) handleRoomEvent(ctx context.Context, ev RoomEvent) {
 func (c *StreamClient) startCapture(ctx context.Context, roomID int64, title string) {
 	captureCtx, cancel := context.WithCancel(ctx)
 
+	handle := &captureHandle{cancel: cancel}
 	c.capturesMu.Lock()
-	if prevCancel, ok := c.captures[roomID]; ok {
-		prevCancel()
+	if prev, ok := c.captures[roomID]; ok {
+		prev.cancel()
 	}
-	c.captures[roomID] = cancel
+	c.captures[roomID] = handle
 	c.capturesMu.Unlock()
+
+	// Defer cleanup for all non-success exits: remove our map entry
+	// (only if not superseded by a newer goroutine) and release context.
+	success := false
+	defer func() {
+		if !success {
+			c.capturesMu.Lock()
+			if c.captures[roomID] == handle {
+				delete(c.captures, roomID)
+			}
+			c.capturesMu.Unlock()
+			cancel()
+		}
+	}()
 
 	for attempt := 0; attempt < maxCaptureRetries; attempt++ {
 		if captureCtx.Err() != nil {
@@ -187,8 +208,10 @@ func (c *StreamClient) startCapture(ctx context.Context, roomID int64, title str
 				Error:  err,
 				Title:  title,
 			})
-			if !retryWait(captureCtx, attempt) {
-				return
+			if attempt+1 < maxCaptureRetries {
+				if !retryWait(captureCtx, attempt) {
+					return
+				}
 			}
 			continue
 		}
@@ -203,8 +226,10 @@ func (c *StreamClient) startCapture(ctx context.Context, roomID int64, title str
 				Error:  err,
 				Title:  title,
 			})
-			if !retryWait(captureCtx, attempt) {
-				return
+			if attempt+1 < maxCaptureRetries {
+				if !retryWait(captureCtx, attempt) {
+					return
+				}
 			}
 			continue
 		}
@@ -220,15 +245,11 @@ func (c *StreamClient) startCapture(ctx context.Context, roomID int64, title str
 			},
 			Title: title,
 		})
+		success = true
 		return
 	}
 
 	slog.Error("client: exhausted capture retries", "room_id", roomID)
-
-	c.capturesMu.Lock()
-	delete(c.captures, roomID)
-	c.capturesMu.Unlock()
-	cancel()
 }
 
 // retryWait waits with exponential backoff. Returns false if the context

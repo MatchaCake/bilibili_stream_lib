@@ -109,6 +109,9 @@ func (m *Monitor) startRoom(ctx context.Context, roomID int64) {
 	roomCtx, cancel := context.WithCancel(ctx)
 
 	m.mu.Lock()
+	if prevCancel, ok := m.rooms[roomID]; ok {
+		prevCancel()
+	}
 	m.rooms[roomID] = cancel
 	m.mu.Unlock()
 
