@@ -3,11 +3,14 @@ package stream
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 )
 
 // CaptureAudio starts an ffmpeg process that reads from streamURL and outputs
@@ -28,7 +31,7 @@ func CaptureAudio(ctx context.Context, streamURL string, cfg *CaptureConfig) (io
 		"-fflags", "nobuffer",
 		"-flags", "low_delay",
 		"-analyzeduration", "500000", // 0.5s (default 5s)
-		"-probesize", "500000",       // 500KB (default 5MB)
+		"-probesize", "500000", // 500KB (default 5MB)
 		// Input: HTTP stream with required headers.
 		"-user_agent", userAgent,
 		"-headers", "Referer: " + referer + "\r\n",
@@ -60,14 +63,19 @@ func CaptureAudio(ctx context.Context, streamURL string, cfg *CaptureConfig) (io
 		return nil, fmt.Errorf("ffmpeg start: %w", err)
 	}
 
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+		close(waitCh)
+	}()
+
 	slog.Info("capture: ffmpeg started", "stream_url_prefix", truncateURL(streamURL))
 
 	return &ffmpegReader{
 		ReadCloser: stdout,
-		cmd:        cmd,
 		cancel:     captureCancel,
-		ctx:        ctx,
 		stderr:     &stderrBuf,
+		waitCh:     waitCh,
 	}, nil
 }
 
@@ -75,33 +83,41 @@ func CaptureAudio(ctx context.Context, streamURL string, cfg *CaptureConfig) (io
 // cleaned up when Close is called.
 type ffmpegReader struct {
 	io.ReadCloser
-	cmd    *exec.Cmd
-	cancel context.CancelFunc
-	ctx    context.Context
-	stderr *bytes.Buffer
+	cancel    context.CancelFunc
+	stderr    *bytes.Buffer
+	waitCh    <-chan error
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (f *ffmpegReader) Close() error {
-	// Close the stdout pipe first.
-	pipeErr := f.ReadCloser.Close()
+	f.closeOnce.Do(func() {
+		pipeErr := f.ReadCloser.Close()
+		waitErr, closeRequested := f.waitForProcess()
 
-	// Cancel the derived context to ensure ffmpeg is terminated,
-	// preventing Wait from blocking if ffmpeg is still reading input.
+		if waitErr != nil && !closeRequested && f.stderr.Len() > 0 {
+			slog.Error("capture: ffmpeg exited with error", "stderr", f.stderr.String())
+		}
+		if waitErr != nil && !closeRequested {
+			f.closeErr = fmt.Errorf("ffmpeg wait: %w", waitErr)
+			return
+		}
+		if pipeErr != nil && !errors.Is(pipeErr, os.ErrClosed) && !errors.Is(pipeErr, io.ErrClosedPipe) {
+			f.closeErr = pipeErr
+		}
+	})
+	return f.closeErr
+}
+
+func (f *ffmpegReader) waitForProcess() (error, bool) {
+	select {
+	case err := <-f.waitCh:
+		return err, false
+	default:
+	}
+
 	f.cancel()
-
-	// Wait for the process to exit.
-	waitErr := f.cmd.Wait()
-
-	// Log stderr if ffmpeg exited with an unexpected error
-	// (not from the caller's context being cancelled).
-	if waitErr != nil && f.ctx.Err() == nil && f.stderr.Len() > 0 {
-		slog.Error("capture: ffmpeg exited with error", "stderr", f.stderr.String())
-	}
-
-	if pipeErr != nil {
-		return pipeErr
-	}
-	return nil
+	return <-f.waitCh, true
 }
 
 // truncateURL returns the first 80 characters of a URL for logging.

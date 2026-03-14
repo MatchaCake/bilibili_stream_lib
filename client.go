@@ -200,36 +200,16 @@ func (c *StreamClient) startCapture(ctx context.Context, roomID int64, title str
 
 		streamURL, err := getStreamURL(captureCtx, roomID, c.cfg.cookie)
 		if err != nil {
-			slog.Warn("client: failed to get stream URL",
-				"room_id", roomID, "attempt", attempt+1, "error", err)
-			c.publishStreamEvent(StreamEvent{
-				RoomID: roomID,
-				Type:   EventError,
-				Error:  err,
-				Title:  title,
-			})
-			if attempt+1 < maxCaptureRetries {
-				if !retryWait(captureCtx, attempt) {
-					return
-				}
+			if !c.retryCapture(captureCtx, roomID, title, attempt, "failed to get stream URL", err) {
+				break
 			}
 			continue
 		}
 
 		reader, err := CaptureAudio(captureCtx, streamURL, &c.cfg.audioCfg)
 		if err != nil {
-			slog.Warn("client: failed to start capture",
-				"room_id", roomID, "attempt", attempt+1, "error", err)
-			c.publishStreamEvent(StreamEvent{
-				RoomID: roomID,
-				Type:   EventError,
-				Error:  err,
-				Title:  title,
-			})
-			if attempt+1 < maxCaptureRetries {
-				if !retryWait(captureCtx, attempt) {
-					return
-				}
+			if !c.retryCapture(captureCtx, roomID, title, attempt, "failed to start capture", err) {
+				break
 			}
 			continue
 		}
@@ -250,6 +230,24 @@ func (c *StreamClient) startCapture(ctx context.Context, roomID int64, title str
 	}
 
 	slog.Error("client: exhausted capture retries", "room_id", roomID)
+}
+
+func (c *StreamClient) retryCapture(ctx context.Context, roomID int64, title string, attempt int, stage string, err error) bool {
+	slog.Warn("client: "+stage,
+		"room_id", roomID,
+		"attempt", attempt+1,
+		"error", err,
+	)
+	c.publishStreamEvent(StreamEvent{
+		RoomID: roomID,
+		Type:   EventError,
+		Error:  err,
+		Title:  title,
+	})
+	if attempt+1 >= maxCaptureRetries {
+		return false
+	}
+	return retryWait(ctx, attempt)
 }
 
 // retryWait waits with exponential backoff. Returns false if the context
